@@ -1,0 +1,13 @@
+# Sensitive — never commit these
+.env
+credentials.json
+token.json
+
+# Auto-generated at runtime
+watcher.log
+watcher.pid
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
