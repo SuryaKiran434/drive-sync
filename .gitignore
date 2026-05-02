@@ -1,3 +1,6 @@
+# macOS
+.DS_Store
+
 # Sensitive — never commit these
 .env
 credentials.json
