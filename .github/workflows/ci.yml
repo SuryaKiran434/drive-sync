@@ -21,9 +21,32 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest
+          # Test-only; requirements.txt stays the pinned runtime set.
+          pip install pytest pytest-cov
 
       # The suite is fully mocked — no network, no credentials, no
       # credentials.json or token.json required.
+      #
+      # drive_sync.py is the whole application — a single top-level module —
+      # so it is the only coverage target.
       - name: Run pytest
-        run: python -m pytest -q
+        run: |
+          python -m pytest -q \
+            --cov=drive_sync --cov-report=xml --cov-report=term
+
+      - name: Coverage summary
+        run: |
+          python - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import xml.etree.ElementTree as ET
+          rate = float(ET.parse("coverage.xml").getroot().get("line-rate"))
+          print("## Coverage")
+          print()
+          print(f"**{rate * 100:.2f}%** of statements in `drive_sync.py` covered.")
+          EOF
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+          if-no-files-found: error
