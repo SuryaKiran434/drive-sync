@@ -3,8 +3,12 @@
 
 # Sensitive — never commit these
 .env
+.env.*
+!.env.example
 credentials.json
+client_secret*.json
 token.json
+*.pem
 
 # Auto-generated at runtime
 watcher.log
@@ -14,3 +18,4 @@ watcher.pid
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/

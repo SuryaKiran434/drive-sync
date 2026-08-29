@@ -85,12 +85,15 @@ DRIVE_FOLDER_ID=your_folder_id_here
 
 ```
 .env
+.env.*
 credentials.json
+client_secret*.json
 token.json
 watcher.log
 watcher.pid
 __pycache__/
 *.pyc
+.pytest_cache/
 ```
 
 ---
@@ -120,8 +123,16 @@ Scans both sides and prints a summary without making any changes:
 
 - Files only on local (not backed up to Drive)
 - Files only on Drive (not present locally)
+- **Modified** — files present on *both* sides whose contents differ, with the
+  direction the change should travel
 - File extension breakdown for each side
 - Total counts
+
+Modified files are found with an rsync-style ladder: byte `size` first (it comes
+back free with the listing and eliminates almost every pair), then `md5Checksum`
+for the survivors, and `modifiedTime` only as a fallback. Google Docs-native
+files (Docs / Sheets / Slides) carry no checksum, so they are reported as
+not-comparable and left alone.
 
 ---
 
@@ -134,6 +145,7 @@ python drive_sync.py push
 Makes Drive mirror your local folder:
 
 - Uploads files that exist locally but not on Drive
+- Re-uploads files whose local contents have changed
 - Deletes (moves to Trash) files on Drive that don't exist locally
 - Shows a full preview and asks for confirmation before doing anything
 
@@ -150,6 +162,7 @@ python drive_sync.py pull
 Makes your local folder mirror Drive:
 
 - Downloads files from Drive that don't exist locally
+- Overwrites local files whose Drive copy has changed
 - Deletes local files that don't exist on Drive
 - Cleans up empty local folders left behind
 - Shows a full preview and asks for confirmation before doing anything
@@ -168,6 +181,8 @@ Gives you full control over each side independently:
 
 - For local-only files: upload all, pick file by file, or skip
 - For Drive-only files: download all, pick file by file, or skip
+- For files modified on both sides: take whichever side is newer, let local win,
+  let Drive win, pick file by file, or skip
 
 ---
 
@@ -181,6 +196,22 @@ python drive_sync.py watch --stop         # stop background watcher
 
 Monitors your local folder in real time. Any file added, modified, moved, or deleted locally is automatically reflected on Drive. Logs written to `watcher.log` in daemon mode.
 
+A `modified` event whose contents already match Drive (same size and MD5) is
+skipped, so the burst of save events most editors emit does not re-upload the
+same bytes over and over.
+
+---
+
+## Tests
+
+The suite runs entirely against a mocked Drive service — it never touches the
+network and needs no credentials.
+
+```bash
+pip install pytest
+pytest
+```
+
 ---
 
 ## Command Reference
@@ -188,8 +219,8 @@ Monitors your local folder in real time. Any file added, modified, moved, or del
 | Command | Source of truth | Uploads | Downloads | Deletes |
 |---|---|---|---|---|
 | `compare` | — | No | No | No |
-| `push` | Local | ✅ Missing files | No | ✅ Drive extras → Trash |
-| `pull` | Drive | No | ✅ Missing files | ✅ Local extras (permanent) |
+| `push` | Local | ✅ Missing + modified | No | ✅ Drive extras → Trash |
+| `pull` | Drive | No | ✅ Missing + modified | ✅ Local extras (permanent) |
 | `sync` | You decide | ✅ If chosen | ✅ If chosen | No |
 | `watch` | Local (ongoing) | ✅ On change | No | ✅ On local delete → Trash |
 
