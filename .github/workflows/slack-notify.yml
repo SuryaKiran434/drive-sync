@@ -5,6 +5,11 @@ on:
     branches:
       - '**'
 
+# Least privilege for GITHUB_TOKEN. This workflow only reads push metadata from
+# the event payload and POSTs to a webhook -- it never writes to the repository.
+permissions:
+  contents: read
+
 jobs:
   notify:
     runs-on: ubuntu-latest
