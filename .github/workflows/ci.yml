@@ -5,6 +5,14 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege for GITHUB_TOKEN. Every job in this workflow only reads the
+# repository -- checkout, dependency install, lint/test and artifact upload all
+# work fine with `contents: read`. A job that ever needs to write (push a commit,
+# comment on a PR, cut a release) must request that scope on itself rather than
+# widening this block.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Tests (Python)
