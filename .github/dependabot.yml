@@ -21,10 +21,6 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
-    # Major versions are opted out deliberately: they carry breaking changes
-    # and should be adopted intentionally, not merged unattended.
-    # NOTE: security advisories still open PRs regardless of this rule, at
-    # any severity -- ignore only suppresses routine version updates.
-    ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-major"]
+
+    # Action majors ARE taken: GitHub deprecates old action runtimes
+    # (v4/v5 tags now force onto Node 24), so these need to move.
