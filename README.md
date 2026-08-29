@@ -1,257 +1,462 @@
 # drive_sync
 
-A single-file Python tool to compare, sync, and watch a local folder against a Google Drive folder — bidirectionally, with full subfolder support.
+A single-file Python tool to compare, sync, and watch a local folder against a
+Google Drive folder — bidirectionally, with full subfolder support, parallel
+Drive listing, and content-based change detection.
 
 ---
 
-## Project Structure
+## Contents
+
+- [What it does](#what-it-does)
+- [Architecture](#architecture)
+- [Running locally](#running-locally)
+- [Commands](#commands)
+- [How listing is made fast](#how-listing-is-made-fast)
+- [How modified files are detected](#how-modified-files-are-detected)
+- [Tests](#tests)
+- [Continuous integration](#continuous-integration)
+- [Security](#security)
+
+---
+
+## What it does
+
+Point it at a local folder and a Drive folder and it will tell you — or fix —
+exactly how the two differ. It classifies every file into one of three buckets:
+
+| Bucket | Meaning |
+|---|---|
+| `only_local` | present locally, missing on Drive |
+| `only_drive` | present on Drive, missing locally |
+| `modified` | present on **both** sides, but the bytes differ |
+
+That third bucket is the important one. Earlier versions compared the two sides
+by **relative path only**, so a file that existed on both ends was considered
+"in sync" forever — an edit on either side was silently never transferred. The
+tool detected additions and deletions and nothing else. It now compares content.
+
+---
+
+## Architecture
+
+```
+                    ┌──────────────────────────────────────┐
+                    │  credentials.json  (OAuth client)    │
+                    │  token.json        (cached grant)    │
+                    └──────────────┬───────────────────────┘
+                                   │ get_service()
+                                   ▼
+                        ┌────────────────────┐
+                        │  Drive v3 service  │
+                        └─────────┬──────────┘
+                                  │
+      ┌───────────────────────────┴────────────────────────────┐
+      │  list_drive_files_meta()  —  parallel level-order BFS   │
+      │                                                        │
+      │   level N folders ──► chunk by PARENTS_PER_QUERY (25)   │
+      │        │                                               │
+      │        ├─► _list_children()  ┐                         │
+      │        ├─► _list_children()  ├─ ThreadPoolExecutor(8)   │
+      │        └─► _list_children()  ┘  each thread: its own    │
+      │                                 AuthorizedHttp          │
+      │        │  pageSize=1000, fields include md5Checksum,    │
+      │        │  size, modifiedTime, parents                   │
+      │        ▼                                               │
+      │   paths rebuilt client-side from `parents` ──► level N+1│
+      └───────────────────────────┬────────────────────────────┘
+                                  │  {rel_path: drive_item}
+                                  ▼
+   Path(LOCAL_FOLDER).rglob("*") ──►  {rel_path}
+                                  │
+                                  ▼
+                       ┌──────────────────────┐
+                       │       scan()         │
+                       │  three-way diff      │
+                       ├──────────────────────┤
+                       │ only_local  (set)    │
+                       │ only_drive  (set)    │
+                       │ changed     (dict) ◄─┼── detect_changes()
+                       │ skipped     (list)   │   size → md5 → mtime
+                       └──────────┬───────────┘
+                                  │  SyncState
+      ┌──────────┬────────────────┼────────────────┬───────────┐
+      ▼          ▼                ▼                ▼           ▼
+   compare     push             pull             sync        watch
+  (read-only) local wins     Drive wins      ask per bucket  watchdog
+```
+
+Everything lives in one module, `drive_sync.py`:
+
+| Layer | Functions |
+|---|---|
+| Auth | `get_service()`, `_worker_http()` |
+| Drive listing | `_list_children()`, `list_drive_files_meta()`, `list_drive_files()` |
+| Drive mutation | `get_or_create_folder()`, `ensure_drive_path()`, `upload()`, `download()`, `trash_on_drive()` |
+| Local scan | `list_local_files()`, `should_ignore()`, `filter_files()`, `file_md5()` |
+| Diff | `detect_changes()`, `scan()`, `SyncState` |
+| Commands | `cmd_compare()`, `cmd_push()`, `cmd_pull()`, `cmd_sync()`, `cmd_watch()` / `run_watcher()` |
+
+---
+
+## Project structure
 
 ```
 drive-sync/
-├── drive_sync.py       # The entire tool — one file
-├── .env                # Your local config (never commit this)
-├── credentials.json    # OAuth credentials from Google Cloud Console (never commit this)
-├── token.json          # Auto-generated after first login (never commit this)
-├── .gitignore          # Excludes sensitive files from version control
+├── drive_sync.py            # The entire tool — one module
+├── requirements.txt         # Runtime dependencies
+├── pytest.ini               # testpaths = tests
+├── env.example              # Template for your .env  (copy, don't edit in place)
+├── .env                     # Your local config              (never commit)
+├── credentials.json         # OAuth client from Google Cloud (never commit)
+├── token.json               # Written after first consent     (never commit)
+├── tests/                   # 57 tests, fully mocked — no network, no credentials
+│   ├── conftest.py
+│   ├── fake_drive.py        # In-memory stand-in for the Drive v3 service
+│   ├── test_listing.py
+│   ├── test_change_detection.py
+│   ├── test_commands.py
+│   └── test_folder_cache.py
+├── .github/
+│   ├── dependabot.yml       # Weekly pip + github-actions updates
+│   └── workflows/
+│       ├── ci.yml           # "Tests (Python)" — required on main
+│       └── slack-notify.yml
+├── .gitignore
 └── README.md
 ```
 
 ---
 
-## Requirements
+## Running locally
 
-### Python packages
+### 1. Prerequisites
 
-```bash
-pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client watchdog
-```
+- **Python 3.12** (what CI runs)
+- A Google account with the folder you want to sync
 
-### Google Cloud setup (one-time)
-
-1. Go to [console.cloud.google.com](https://console.cloud.google.com)
-2. Create a new project (or use an existing one)
-3. Navigate to **APIs & Services → Library** and enable **Google Drive API**
-4. Go to **APIs & Services → OAuth consent screen**
-   - Choose **External**, fill in the app name
-   - Under **Test users**, add your Gmail address
-5. Go to **APIs & Services → Credentials → Create Credentials → OAuth 2.0 Client ID**
-   - Application type: **Desktop App**
-   - Download the JSON file and save it as `credentials.json` in the project folder
-
-### Finding your Drive Folder ID
-
-Open your Google Drive folder in the browser. The URL looks like:
-
-```
-https://drive.google.com/drive/u/0/folders/<YOUR_FOLDER_ID>
-```
-
-The last segment after `/folders/` is your folder ID.
-
----
-
-## Configuration
-
-Create a `.env` file in the project folder (copy from `.env.example`):
+### 2. Clone and create a virtualenv
 
 ```bash
-cp .env.example .env
+git clone https://github.com/SuryaKiran434/drive-sync.git
+cd drive-sync
+
+python3.12 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 ```
 
-Then fill in your values:
+### 3. Install dependencies
 
-```env
-LOCAL_FOLDER=/path/to/your/local/folder
-DRIVE_FOLDER_ID=your_drive_folder_id_here
+```bash
+pip install -r requirements.txt
 ```
 
-> ⚠️ Never commit `.env`, `credentials.json`, or `token.json` to version control. They are listed in `.gitignore`.
+`requirements.txt` covers the Drive client, OAuth and `python-dotenv`. Two
+extras are only needed for optional paths:
 
----
-
-## .env.example
-
-```env
-# Path to the local folder you want to sync
-LOCAL_FOLDER=/path/to/your/folder
-
-# Google Drive folder ID (from the URL of your Drive folder)
-DRIVE_FOLDER_ID=your_folder_id_here
+```bash
+pip install watchdog     # required by `watch` only
+pip install pytest       # required to run the test suite only
 ```
 
----
+### 4. Get OAuth credentials from Google Cloud Console
 
-## .gitignore
+One-time setup:
 
-```
-.env
-.env.*
-credentials.json
-client_secret*.json
-token.json
-watcher.log
-watcher.pid
-__pycache__/
-*.pyc
-.pytest_cache/
-```
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) and create
+   a project (or reuse one).
+2. **APIs & Services → Library** → enable **Google Drive API**.
+3. **APIs & Services → OAuth consent screen** → choose **External**, fill in an
+   app name, and add your own Google address under **Test users**.
+4. **APIs & Services → Credentials → Create Credentials → OAuth client ID** →
+   application type **Desktop app**.
+5. Download the JSON and save it as **`credentials.json` in the repository
+   root** (the same directory as `drive_sync.py`).
 
----
+### 5. First run: browser consent produces `token.json`
 
-## Authentication
+The first command you run opens a browser window asking you to sign in and grant
+Drive access. On success the tool writes **`token.json`** next to
+`drive_sync.py` and reuses it from then on — later runs are non-interactive.
 
-The first time you run any command, a browser window will open asking you to sign in with your Google account and grant access. After that, a `token.json` file is saved locally and reused automatically.
-
-> If you see a `403 insufficient permissions` error, delete `token.json` and re-run. This happens when the cached token was created with the wrong scope.
+If you ever hit `403 insufficient permissions`, the cached token was minted with
+the wrong scope. Delete it and re-consent:
 
 ```bash
 rm token.json
-python drive_sync.py <command>
+python drive_sync.py compare
+```
+
+### 6. Configure `.env`
+
+Copy the template and fill in your own values:
+
+```bash
+cp env.example .env
+```
+
+| Variable | Meaning |
+|---|---|
+| `LOCAL_FOLDER` | Absolute path to the local folder to sync |
+| `DRIVE_FOLDER_ID` | The Drive folder id — the last path segment of the folder's URL |
+
+```env
+# Placeholders — replace with your own values
+LOCAL_FOLDER=/path/to/your/local/folder
+DRIVE_FOLDER_ID=your_folder_id_here
+```
+
+To find the folder id, open the folder in Drive and read it off the URL:
+
+```
+https://drive.google.com/drive/u/0/folders/<DRIVE_FOLDER_ID>
+                                            ^^^^^^^^^^^^^^^
+```
+
+Both variables are mandatory; the tool exits with an error if either is missing.
+They may also come from the real environment (CI, `export`) instead of a `.env`
+file.
+
+### 7. Run a command
+
+```bash
+python drive_sync.py compare
+```
+
+### 8. Run the tests
+
+```bash
+python -m pytest
 ```
 
 ---
 
 ## Commands
 
-### `compare` — See what's different
+### `compare` — read-only, changes nothing
 
 ```bash
 python drive_sync.py compare
 ```
 
-Scans both sides and prints a summary without making any changes:
+Prints, without touching either side:
 
-- Files only on local (not backed up to Drive)
-- Files only on Drive (not present locally)
-- **Modified** — files present on *both* sides whose contents differ, with the
-  direction the change should travel
-- File extension breakdown for each side
-- Total counts
+- files only on local (not backed up to Drive)
+- files only on Drive (not present locally)
+- **modified** files — present on both sides with differing contents, annotated
+  with the reason (`size` / `md5` / `mtime`) and the direction the change should
+  travel
+- Google-native files that could not be compared
+- an extension breakdown per side, and totals
 
-Modified files are found with an rsync-style ladder: byte `size` first (it comes
-back free with the listing and eliminates almost every pair), then `md5Checksum`
-for the survivors, and `modifiedTime` only as a fallback. Google Docs-native
-files (Docs / Sheets / Slides) carry no checksum, so they are reported as
-not-comparable and left alone.
-
----
-
-### `push` — Local is source of truth
+### `push` — local is the source of truth
 
 ```bash
 python drive_sync.py push
 ```
 
-Makes Drive mirror your local folder:
+Makes Drive mirror local: uploads local-only files, **re-uploads files whose
+local contents changed**, and trashes Drive-only files. Shows a full preview and
+asks for confirmation first.
 
-- Uploads files that exist locally but not on Drive
-- Re-uploads files whose local contents have changed
-- Deletes (moves to Trash) files on Drive that don't exist locally
-- Shows a full preview and asks for confirmation before doing anything
-
-Use this after cleaning up your local folder and wanting Drive to match exactly.
-
----
-
-### `pull` — Drive is source of truth
+### `pull` — Drive is the source of truth
 
 ```bash
 python drive_sync.py pull
 ```
 
-Makes your local folder mirror Drive:
+Makes local mirror Drive: downloads Drive-only files, **overwrites local files
+whose Drive copy changed**, deletes local-only files, and cleans up the empty
+directories left behind. Previews and confirms first.
 
-- Downloads files from Drive that don't exist locally
-- Overwrites local files whose Drive copy has changed
-- Deletes local files that don't exist on Drive
-- Cleans up empty local folders left behind
-- Shows a full preview and asks for confirmation before doing anything
-
-Use this when Drive has been updated from another device.
-
----
-
-### `sync` — Interactive, choose per side
+### `sync` — interactive, decide per bucket
 
 ```bash
 python drive_sync.py sync
 ```
 
-Gives you full control over each side independently:
+- local-only files → upload all / pick file by file / skip
+- Drive-only files → download all / pick file by file / skip
+- modified on both sides → **newer wins** / **local wins** / **Drive wins** /
+  pick file by file / skip
 
-- For local-only files: upload all, pick file by file, or skip
-- For Drive-only files: download all, pick file by file, or skip
-- For files modified on both sides: take whichever side is newer, let local win,
-  let Drive win, pick file by file, or skip
+### `watch` — mirror local changes as they happen
+
+```bash
+python drive_sync.py watch            # foreground, Ctrl+C to stop
+python drive_sync.py watch --daemon   # background, logs to watcher.log
+python drive_sync.py watch --stop     # stop the background watcher
+```
+
+Watches the local tree with `watchdog` and reflects creates, modifies, moves and
+deletes onto Drive. A `modified` event whose bytes already match Drive is
+skipped, so the burst of save events most editors emit does not re-upload the
+same content over and over.
+
+### Command reference
+
+| Command | Source of truth | Uploads | Downloads | Deletes |
+|---|---|---|---|---|
+| `compare` | — | No | No | No |
+| `push` | Local | Missing + modified | No | Drive extras → Trash |
+| `pull` | Drive | No | Missing + modified | Local extras (permanent) |
+| `sync` | You decide | If chosen | If chosen | No |
+| `watch` | Local (ongoing) | On change | No | On local delete → Trash |
 
 ---
 
-### `watch` — Auto-upload on file changes
+## How listing is made fast
 
-```bash
-python drive_sync.py watch                # foreground (Ctrl+C to stop)
-python drive_sync.py watch --daemon       # background
-python drive_sync.py watch --stop         # stop background watcher
-```
+Listing used to be a recursive walk: one blocking `files.list` call per folder,
+at the API default page size of 100. A 40-folder tree cost **41 round trips**,
+serially. It now costs **3**.
 
-Monitors your local folder in real time. Any file added, modified, moved, or deleted locally is automatically reflected on Drive. Logs written to `watcher.log` in daemon mode.
+Two changes did it.
 
-A `modified` event whose contents already match Drive (same size and MD5) is
-skipped, so the burst of save events most editors emit does not re-upload the
-same bytes over and over.
+**1. Fewer, wider queries.** Every folder on a BFS level is OR-ed into a single
+query — up to `PARENTS_PER_QUERY = 25` parents per `q` — at
+`PAGE_SIZE = 1000`, the API maximum. A 2000-file folder is 2 pages instead of
+20.
+
+**2. Levels are fetched in parallel.** Chunks for a level are dispatched across
+a `ThreadPoolExecutor` with `LIST_MAX_WORKERS = 8`. The pool is deliberately
+small: this workload is latency-bound, not CPU-bound. Cost drops from one
+round trip per *folder* to one round trip per *depth level*.
+
+The listing request asks for `id, name, mimeType, parents, md5Checksum, size,
+modifiedTime`, so the hierarchy is rebuilt client-side from each item's
+`parents` field and change detection gets its inputs for free — no extra calls
+are made to resolve paths.
+
+### Why not one flat drive-wide query?
+
+Because Drive's query language **has no "descendant of" operator**. `'X' in
+parents` matches **direct children only**. There is therefore no single query
+that means "everything under this folder". The only flat option is
+`trashed = false` across the entire drive, filtered client-side — which is
+correct, but downloads the user's *whole Drive* in order to sync one folder,
+and is unbounded in cost. Level-order BFS keeps the work proportional to the
+subtree actually being synced.
+
+### Thread safety
+
+`httplib2` — which `google-api-python-client` rides on — is **not thread-safe**,
+and a `service` object shares a single `Http` instance across all callers.
+Handing that object to eight worker threads corrupts responses.
+
+So `_worker_http()` builds a **per-thread** `AuthorizedHttp` in
+`threading.local()` and each request is issued as `req.execute(http=...)`. When
+there are no real credentials (the test suite drives a mock service) it returns
+`None` and `execute()` is called plainly.
+
+### Folder-id cache
+
+`get_or_create_folder()` is memoised with `functools.lru_cache(maxsize=4096)`.
+It previously used a `cache={}` mutable default argument, which bound once at
+import time, lived for the entire process, and would happily hand back the id of
+a folder that had since been deleted. The `lru_cache` is bounded and every
+command calls `get_or_create_folder.cache_clear()` at start-up.
+
+---
+
+## How modified files are detected
+
+`detect_changes()` walks the files present on both sides and applies an
+rsync-style ladder, cheapest signal first:
+
+| Rung | Signal | Cost | Notes |
+|---|---|---|---|
+| 1 | `size` | free | Already in the listing response; eliminates almost every pair |
+| 2 | `md5Checksum` | local hash | Only for size-equal survivors; the local MD5 is computed lazily, per survivor |
+| 3 | `modifiedTime` | free | Fallback only, for files Drive has no MD5 for; `MTIME_TOLERANCE` is 2s |
+
+Each changed file is recorded with its reason, both sizes, both mtimes, and
+`local_newer` — which is what lets `sync` offer a direction-aware "newer wins".
+When Drive reports no timestamp at all, `local_newer` defaults to `True` so the
+tool errs toward preserving local rather than clobbering it.
+
+**Google-native files** (Docs, Sheets, Slides, Forms — any
+`application/vnd.google-apps.*`) carry neither an MD5 nor a meaningful byte
+size, and cannot be round-tripped as bytes. They are reported as *skipped /
+not comparable* rather than compared, and are never modified.
+
+Modified files are wired through every command: `compare` reports them, `push`
+re-uploads them, `pull` re-downloads them, `sync` prompts for a direction, and
+`watch` uses the same comparison to suppress no-op save events.
+
+---
+
+## Ignored files
+
+Skipped on both sides:
+
+- `.DS_Store`, `Thumbs.db`, `.git`
+- `.tmp`, `.swp`, `.part`
 
 ---
 
 ## Tests
 
-The suite runs entirely against a mocked Drive service — it never touches the
-network and needs no credentials.
+**57 tests**, all fully mocked — the suite never touches the network and needs
+no `credentials.json`, no `token.json` and no `.env`.
 
 ```bash
 pip install pytest
-pytest
+python -m pytest
 ```
 
----
+| File | Tests | Covers |
+|---|---|---|
+| `tests/test_listing.py` | 18 | BFS levels, chunking, pagination, multi-parent and orphan handling, cycle guard |
+| `tests/test_change_detection.py` | 17 | The size → md5 → mtime ladder, Google-native skips, `local_newer` |
+| `tests/test_commands.py` | 15 | `compare` / `push` / `pull` / `sync` / `watch` behaviour |
+| `tests/test_folder_cache.py` | 7 | `get_or_create_folder` memoisation and `cache_clear()` |
 
-## Command Reference
-
-| Command | Source of truth | Uploads | Downloads | Deletes |
-|---|---|---|---|---|
-| `compare` | — | No | No | No |
-| `push` | Local | ✅ Missing + modified | No | ✅ Drive extras → Trash |
-| `pull` | Drive | No | ✅ Missing + modified | ✅ Local extras (permanent) |
-| `sync` | You decide | ✅ If chosen | ✅ If chosen | No |
-| `watch` | Local (ongoing) | ✅ On change | No | ✅ On local delete → Trash |
+`tests/fake_drive.py` is an in-memory stand-in for the Drive v3 service, so the
+same code path runs in tests as in production.
 
 ---
 
-## Ignored Files
+## Continuous integration
 
-Automatically skipped on both sides:
+`.github/workflows/ci.yml` runs the suite on Python 3.12 for every push to
+`main` and every pull request. The job is named **`Tests (Python)`** and is a
+**required status check on `main`** — a pull request cannot merge until it
+passes.
 
-- `.DS_Store` (macOS metadata)
-- `Thumbs.db` (Windows thumbnails)
-- `.git` (version control)
-- `.tmp`, `.swp`, `.part` (temporary files)
+`.github/dependabot.yml` opens weekly dependency PRs (max 5 open at a time) for
+both `pip` (root `requirements.txt`) and `github-actions`.
 
 ---
 
-## Moving the Project
+## Security
 
-To move the project folder to a new location:
+**Never commit these — they are already in `.gitignore`, keep it that way:**
 
-```bash
-mv /old/path/drive-sync /new/path/drive-sync
-```
+| File | Why |
+|---|---|
+| `.env` | Contains your local paths and Drive folder id |
+| `credentials.json` | Your OAuth **client secret** from Google Cloud |
+| `token.json` | A live access + refresh token for your Drive account |
 
-No code changes needed — paths are read from `.env` at runtime.
+`token.json` in particular is a bearer credential for the full
+`https://www.googleapis.com/auth/drive` scope. If one ever lands in a commit,
+revoke the client in Google Cloud Console and delete the local token — rotating
+is the only fix, since git history keeps the old value.
+
+Commit `env.example` (placeholders only), never `.env`.
 
 ---
 
 ## Notes
 
-- Deletions via `push`, `pull`, and `watch` move files to **Google Drive Trash** — recoverable within 30 days.
-- Local deletions via `pull` are **permanent**. Review the preview carefully before confirming.
-- Subfolder structure is fully preserved. Missing Drive subfolders are created automatically during upload.
-- Files are matched by **relative path and filename** only — not by content or modification date.
+- Deletions from `push`, `pull` and `watch` move Drive files to **Trash**, which
+  is recoverable for 30 days.
+- Local deletions performed by `pull` are **permanent**. Read the preview before
+  confirming.
+- Subfolder structure is preserved; missing Drive subfolders are created on
+  upload.
+- Files are matched by relative path, then compared by **content** (size, then
+  MD5, then modification time).
+- The project folder can be moved anywhere — all paths come from `.env` at
+  runtime.
