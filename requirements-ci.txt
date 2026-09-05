@@ -1,0 +1,21 @@
+# Test-only dependencies, pinned for CI.
+#
+# Why this file exists: these two packages used to be installed by an ad-hoc
+# `pip install pytest pytest-cov` line in .github/workflows/ci.yml, completely
+# unpinned. Dependabot parses dependency manifests, not shell commands, so it
+# could not see them at all -- and pip resolved whatever was latest on the day
+# the job ran, meaning a new pytest major could break the build with no change
+# to this repository. Declaring them here makes the versions explicit, keeps
+# them reproducible, and puts them where Dependabot can propose bumps.
+#
+# Why this is NOT part of requirements.txt: requirements.txt is the pinned
+# RUNTIME set -- what drive_sync.py actually needs to run. Nothing here is
+# imported by the application; it exists only to run the test suite. This file
+# also deliberately does not `-r requirements.txt`; the CI job installs both,
+# in that order, so the two sets stay separately reviewable.
+#
+# Versions below are the ones CI actually resolved on the last successful run
+# on main (workflow run 33989998924), so adopting this file locks the set that
+# was already green rather than moving it.
+pytest==9.1.1
+pytest-cov==7.1.0
