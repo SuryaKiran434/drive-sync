@@ -13,7 +13,8 @@
 version: 2
 
 updates:
-  # Python dependencies declared in requirements.txt at the repo root.
+  # Python dependencies declared at the repo root: requirements.txt (the
+  # pinned runtime set) and requirements-ci.txt (test-only pins used by CI).
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
