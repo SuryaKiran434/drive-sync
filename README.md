@@ -106,6 +106,7 @@ drive-sync/
 ├── drive_sync.py            # The entire tool — one module
 ├── requirements.txt         # Runtime dependencies
 ├── pytest.ini               # testpaths = tests
+├── sonar-project.properties # SonarCloud scan configuration, used by CI
 ├── env.example              # Template for your .env  (copy, don't edit in place)
 ├── .env                     # Your local config              (never commit)
 ├── credentials.json         # OAuth client from Google Cloud (never commit)
@@ -118,11 +119,13 @@ drive-sync/
 │   ├── test_commands.py
 │   └── test_folder_cache.py
 ├── .github/
-│   ├── dependabot.yml       # Weekly pip + github-actions updates
+│   ├── dependabot.yml       # One grouped weekly PR per ecosystem
 │   └── workflows/
-│       ├── ci.yml           # "Tests (Python)" — required on main
+│       ├── ci.yml           # "Tests (Python)" + coverage + Sonar — required on main
+│       ├── dependabot-auto-merge.yml
 │       └── slack-notify.yml
 ├── .gitignore
+├── LICENSE
 └── README.md
 ```
 
@@ -422,10 +425,23 @@ same code path runs in tests as in production.
 `.github/workflows/ci.yml` runs the suite on Python 3.12 for every push to
 `main` and every pull request. The job is named **`Tests (Python)`** and is a
 **required status check on `main`** — a pull request cannot merge until it
-passes.
+passes. The same job measures coverage (`--cov=drive_sync`), uploads
+`coverage.xml` as a build artifact, and then runs a **SonarCloud** scan
+configured by `sonar-project.properties`. The scan is advisory, not a gate:
+`continue-on-error` keeps a Sonar outage from failing the required check.
 
-`.github/dependabot.yml` opens weekly dependency PRs (max 5 open at a time) for
-both `pip` (root `requirements.txt`) and `github-actions`.
+`.github/dependabot.yml` opens **one grouped pull request per ecosystem per
+week** — `pip` (root `requirements.txt`) and `github-actions` — collapsing that
+week's patch and minor bumps into a single PR rather than one PR per
+dependency, with a limit of 5 open PRs each. Library majors are deliberately
+ignored for `pip` so they are adopted intentionally (security advisories still
+open PRs regardless); Actions majors *are* taken, because GitHub retires old
+action runtimes.
+
+`.github/workflows/dependabot-auto-merge.yml` enables auto-merge on a
+Dependabot PR whose highest bump is patch or minor, so it merges itself **once
+the required checks pass**. A major update — or a red check — leaves the PR
+open for review.
 
 ---
 
