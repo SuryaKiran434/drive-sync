@@ -1,3 +1,15 @@
+# Dependabot: grouping + auto-merge
+#
+# Each ecosystem below opens ONE grouped PR per week covering its minor and
+# patch updates, rather than one PR per dependency. Majors are kept OUT of the
+# groups, so they arrive as their own PRs.
+#
+# That split is exactly what .github/workflows/dependabot-auto-merge.yml keys
+# on: a grouped minor/patch PR merges itself once the required checks pass, a
+# major waits for a human. fetch-metadata reports the HIGHEST bump in a PR, so
+# excluding majors from the groups is what stops one breaking change from
+# either riding along unseen or stalling an entire batch.
+
 version: 2
 
 updates:
@@ -14,6 +26,15 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+    groups:
+      # Collapses this ecosystem's weekly updates into ONE PR. Majors are left
+      # out so a group can never carry a breaking change (see header).
+      pip:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   # Actions pinned in .github/workflows/*.yml
   - package-ecosystem: "github-actions"
@@ -21,6 +42,15 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    groups:
+      # Collapses this ecosystem's weekly updates into ONE PR. Majors are left
+      # out so a group can never carry a breaking change (see header).
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
     # Action majors ARE taken: GitHub deprecates old action runtimes
     # (v4/v5 tags now force onto Node 24), so these need to move.
