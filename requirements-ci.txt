@@ -17,5 +17,5 @@
 # Versions below are the ones CI actually resolved on the last successful run
 # on main (workflow run 33989998924), so adopting this file locks the set that
 # was already green rather than moving it.
-pytest==9.1.1
+pytest==9.2.0
 pytest-cov==7.1.0
